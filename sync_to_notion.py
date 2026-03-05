@@ -63,7 +63,7 @@ def fetch_latest_brief(slack: WebClient) -> dict | None:
         text = text.strip()
 
         # Identify Momentum briefs by their recurring title phrase
-        if "reasons our customers leave their current software" in text.lower():
+        if "leave their current software" in text.lower():
             return {"text": text, "ts": msg["ts"]}
 
     return None
