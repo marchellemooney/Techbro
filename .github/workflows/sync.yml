@@ -1,0 +1,37 @@
+name: Weekly Notion Sync
+
+on:
+  schedule:
+    - cron: "0 14 * * 4"   # Thursdays 9am ET (14:00 UTC / EST) — runs 10am ET in summer
+  workflow_dispatch:         # allows manual trigger from GitHub UI
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run sync
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+          SLACK_CHANNEL_ID: ${{ secrets.SLACK_CHANNEL_ID }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+        run: python sync_to_notion.py
+
+      - name: Save mention counts
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add mention_counts.json
+          git diff --cached --quiet || git commit -m "chore: update mention counts [skip ci]"
+          git push
