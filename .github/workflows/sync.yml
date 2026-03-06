@@ -5,6 +5,9 @@ on:
     - cron: "0 14 * * 4"   # Thursdays 9am ET (14:00 UTC / EST) — runs 10am ET in summer
   workflow_dispatch:         # allows manual trigger from GitHub UI
 
+permissions:
+  contents: write
+
 jobs:
   sync:
     runs-on: ubuntu-latest
