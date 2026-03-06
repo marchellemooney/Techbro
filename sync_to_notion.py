@@ -166,16 +166,25 @@ def content_blocks(content: str) -> list:
     ]
 
 
-def replace_page_body(notion: NotionClient, page_id: str, content: str) -> None:
-    """Delete all existing blocks in the page and write fresh content."""
+def get_page_body_text(notion: NotionClient, page_id: str) -> str:
+    """Return all plain text from existing page blocks."""
     existing = notion.blocks.children.list(block_id=page_id)
+    lines = []
     for block in existing.get("results", []):
-        notion.blocks.delete(block_id=block["id"])
-    if content.strip():
-        notion.blocks.children.append(
-            block_id=page_id,
-            children=content_blocks(content),
-        )
+        if block.get("type") in ("paragraph", "heading_2"):
+            for rt in block.get(block["type"], {}).get("rich_text", []):
+                lines.append(rt.get("plain_text", ""))
+    return "\n".join(lines)
+
+
+def filter_new_lines(new_content: str, existing_text: str) -> str:
+    """Return only lines from new_content that don't already exist in the page."""
+    existing_lines = {l.strip().lower() for l in existing_text.split("\n") if l.strip()}
+    new_lines = [
+        line for line in new_content.split("\n")
+        if line.strip() and line.strip().lower() not in existing_lines
+    ]
+    return "\n".join(new_lines)
 
 
 def upsert_sections(notion: NotionClient, sections: list[dict]) -> tuple[int, int]:
@@ -183,19 +192,44 @@ def upsert_sections(notion: NotionClient, sections: list[dict]) -> tuple[int, in
     updated = 0
 
     for section in sections:
-        props = build_properties(section)
         page_id = find_competitor_page(notion, section["name"])
 
         if page_id:
-            notion.pages.update(page_id=page_id, properties=props)
-            replace_page_body(notion, page_id, section["content"])
-            print(f"  Updated : {section['name']} ({section['date_str']})")
-            updated += 1
+            existing_text = get_page_body_text(notion, page_id)
+            new_content = filter_new_lines(section["content"], existing_text)
+
+            if new_content.strip():
+                # Prepend a week heading so new additions are clearly dated
+                week_heading = {
+                    "object": "block",
+                    "type": "heading_2",
+                    "heading_2": {"rich_text": rich_text(f"Week of {section['date_str']}")},
+                }
+                notion.blocks.children.append(
+                    block_id=page_id,
+                    children=[week_heading] + content_blocks(new_content),
+                )
+                # Update Date Collected to reflect the latest sync
+                notion.pages.update(
+                    page_id=page_id,
+                    properties={"Date Collected": {"date": {"start": section["date_str"]}}},
+                )
+                print(f"  Updated : {section['name']} — new insights added ({section['date_str']})")
+                updated += 1
+            else:
+                print(f"  Skipped : {section['name']} — no new insights this week")
+
         else:
+            props = build_properties(section)
+            week_heading = {
+                "object": "block",
+                "type": "heading_2",
+                "heading_2": {"rich_text": rich_text(f"Week of {section['date_str']}")},
+            }
             page = notion.pages.create(
                 parent={"database_id": NOTION_DATABASE_ID},
                 properties=props,
-                children=content_blocks(section["content"]),
+                children=[week_heading] + content_blocks(section["content"]),
             )
             print(f"  Created : {section['name']} → {page.get('url', '')}")
             created += 1
