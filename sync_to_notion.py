@@ -117,7 +117,7 @@ def parse_sections(brief_text: str) -> list[dict]:
         if is_section_header(line):
             if current:
                 sections.append(current)
-            name = line.rstrip("*").strip()
+            name = line.strip("*").strip()
             current = {"name": name, "content": "", "date_str": date_str}
         elif current:
             current["content"] += ("" if not current["content"] else "\n") + line
@@ -265,6 +265,8 @@ def upsert_sections(notion: NotionClient, sections: list[dict]) -> tuple[int, in
     updated = 0
 
     for section in sections:
+        if not section["name"] or section["name"].lower() in ("undefined", "-"):
+            continue
         page_id = find_competitor_page(notion, section["name"])
 
         if page_id:
