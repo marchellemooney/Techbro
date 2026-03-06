@@ -316,7 +316,7 @@ def upsert_sections(notion: NotionClient, sections: list[dict]) -> tuple[int, in
 
 def main():
     slack  = WebClient(token=SLACK_BOT_TOKEN)
-    notion = NotionClient(auth=NOTION_API_KEY)
+    notion = NotionClient(auth=NOTION_API_KEY, notion_version="2022-06-28")
 
     print(f"Checking Slack for briefs from the last {LOOKBACK_DAYS} days...")
     brief = fetch_latest_brief(slack)
