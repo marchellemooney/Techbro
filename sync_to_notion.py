@@ -6,6 +6,7 @@ and upserts one Notion database row per competitor — updating it each week
 rather than adding new rows.
 """
 
+import json
 import os
 import re
 import sys
@@ -24,6 +25,8 @@ NOTION_API_KEY     = os.environ["NOTION_API_KEY"]
 NOTION_DATABASE_ID = "7c56d30fe9be4803bd00a91cd5c40ca0"
 
 LOOKBACK_DAYS = 8
+PROMOTION_THRESHOLD = 3          # weeks a name must appear before getting its own row
+MENTION_COUNTS_FILE = os.path.join(os.path.dirname(__file__), "mention_counts.json")
 
 
 # ---------------------------------------------------------------------------
@@ -123,6 +126,73 @@ def parse_sections(brief_text: str) -> list[dict]:
         sections.append(current)
 
     return sections
+
+
+# ---------------------------------------------------------------------------
+# Step 2b — Promote frequent "other platforms" competitors to their own row
+# ---------------------------------------------------------------------------
+
+def load_mention_counts() -> dict:
+    if os.path.exists(MENTION_COUNTS_FILE):
+        with open(MENTION_COUNTS_FILE) as f:
+            return json.load(f)
+    return {}
+
+
+def save_mention_counts(counts: dict) -> None:
+    with open(MENTION_COUNTS_FILE, "w") as f:
+        json.dump(counts, f, indent=2)
+
+
+def is_catchall_section(name: str) -> bool:
+    keywords = ("other", "additional", "misc", "various", "alternative")
+    return any(k in name.lower() for k in keywords)
+
+
+def extract_named_competitors(content: str) -> list[str]:
+    """Extract competitor names from lines like 'Booker: ...' or 'Square - ...'"""
+    names = []
+    for line in content.split("\n"):
+        match = re.match(r"^\*?([A-Z][A-Za-z0-9/& ]{1,30}?)\*?\s*[:\-–]", line.strip())
+        if match:
+            names.append(match.group(1).strip())
+    return names
+
+
+def promote_competitors(sections: list[dict], counts: dict) -> list[dict]:
+    """
+    Scan catchall sections for named competitors. Increment their mention count.
+    If a competitor hits PROMOTION_THRESHOLD and doesn't already have its own
+    section, inject a dedicated section for them.
+    """
+    top_level_names = {s["name"].lower() for s in sections if not is_catchall_section(s["name"])}
+    extra: list[dict] = []
+
+    for section in sections:
+        if not is_catchall_section(section["name"]):
+            continue
+
+        for name in extract_named_competitors(section["content"]):
+            if name.lower() in top_level_names:
+                continue  # already has its own section
+
+            counts[name] = counts.get(name, 0) + 1
+
+            if counts[name] >= PROMOTION_THRESHOLD:
+                if not any(s["name"].lower() == name.lower() for s in extra):
+                    relevant = [
+                        l for l in section["content"].split("\n")
+                        if name.lower() in l.lower()
+                    ]
+                    extra.append({
+                        "name": name,
+                        "content": "\n".join(relevant),
+                        "date_str": section["date_str"],
+                    })
+                    print(f"  Promoting '{name}' to its own row "
+                          f"(mentioned {counts[name]} weeks in other platforms)")
+
+    return extra
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +330,12 @@ def main():
         return
 
     print(f"Found {len(sections)} section(s): {[s['name'] for s in sections]}\n")
+
+    counts = load_mention_counts()
+    promoted = promote_competitors(sections, counts)
+    save_mention_counts(counts)
+    sections.extend(promoted)
+
     print("Upserting to Notion...")
     created, updated = upsert_sections(notion, sections)
     print(f"\nDone! {created} row(s) created, {updated} updated.")
