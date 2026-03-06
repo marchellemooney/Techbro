@@ -149,10 +149,8 @@ def build_properties(section: dict) -> dict:
     return {
         "Insight Title":  {"title": rich_text(title)},
         "Date Collected": {"date": {"start": section["date_str"]}},
-        "Contributor":    {"rich_text": rich_text("Momentum")},
         "Key Takeaways":  {"rich_text": rich_text(section["content"])},
         "Insight Type":   {"select": {"name": "Competitive Intelligence"}},
-        "Source Document":{"rich_text": rich_text("Slack #marketing-insights")},
     }
 
 
