@@ -121,12 +121,6 @@ def parse_sections(brief_text: str) -> list[dict]:
 # Step 3 — Push to Notion (one row per competitor)
 # ---------------------------------------------------------------------------
 
-def get_property_types(notion: NotionClient) -> dict:
-    """Return {property_name: type_string} for every column in the DB."""
-    db = notion.databases.retrieve(database_id=NOTION_DATABASE_ID)
-    return {name: prop["type"] for name, prop in db["properties"].items()}
-
-
 def already_synced(notion: NotionClient, competitor: str, date_str: str) -> bool:
     results = notion.databases.query(
         database_id=NOTION_DATABASE_ID,
@@ -142,43 +136,20 @@ def rich_text(value: str) -> list:
     return [{"type": "text", "text": {"content": value[:1999]}}]
 
 
-def build_properties(section: dict, prop_types: dict) -> dict:
+def build_properties(section: dict) -> dict:
     title = f"{section['name']} \u2014 {section['date_str']}"
 
-    props: dict = {
-        "Insight Title": {"title": rich_text(title)},
+    return {
+        "Insight Title":  {"title": rich_text(title)},
+        "Date Collected": {"date": {"start": section["date_str"]}},
+        "Contributor":    {"rich_text": rich_text("Momentum")},
+        "Key Takeaways":  {"rich_text": rich_text(section["content"])},
+        "Insight Type":   {"select": {"name": "Competitive Intelligence"}},
+        "Source Document":{"rich_text": rich_text("Slack #marketing-insights")},
     }
-
-    def set_prop(name, value):
-        """Set a property using the correct type for this database."""
-        if name not in prop_types:
-            return
-        t = prop_types[name]
-        if t == "rich_text":
-            props[name] = {"rich_text": rich_text(value)}
-        elif t == "select":
-            props[name] = {"select": {"name": value}}
-        elif t == "multi_select":
-            props[name] = {"multi_select": [{"name": value}]}
-        elif t == "url":
-            props[name] = {"url": value}
-        elif t == "email":
-            pass  # skip
-        elif t == "date":
-            props[name] = {"date": {"start": value}}
-
-    set_prop("Date Collected", section["date_str"])
-    set_prop("Contributor", "Momentum")
-    set_prop("Key Takeaways", section["content"])
-    set_prop("Insight Type", "Competitive Intelligence")
-    set_prop("Source Document", "Slack #marketing-insights")
-
-    return props
 
 
 def sync_sections(notion: NotionClient, sections: list[dict]) -> tuple[int, int]:
-    prop_types = get_property_types(notion)
-
     created = 0
     skipped = 0
 
@@ -188,7 +159,7 @@ def sync_sections(notion: NotionClient, sections: list[dict]) -> tuple[int, int]
             skipped += 1
             continue
 
-        props = build_properties(section, prop_types)
+        props = build_properties(section)
 
         # Full content also goes in the page body for easy reading
         children = [
