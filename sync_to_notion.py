@@ -265,6 +265,8 @@ def upsert_sections(notion: NotionClient, sections: list[dict]) -> tuple[int, in
     updated = 0
 
     for section in sections:
+        if not section["name"] or section["name"].lower() in ("undefined", "-"):
+            continue
         page_id = find_competitor_page(notion, section["name"])
 
         if page_id:
