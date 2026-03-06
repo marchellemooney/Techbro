@@ -67,24 +67,26 @@ def extract_date_range(text: str) -> str:
     return match.group(1) if match else datetime.now().strftime("%Y-%m-%d")
 
 
-def extract_competitor_name(line: str) -> str:
-    """Pull the competitor/section name from a brief line."""
-    # Strip leading bullets and label prefixes like NEW:, CRITICAL:, * undefined
-    clean = re.sub(r"^[\*\-\s]*(?:undefined\s+)?", "", line).strip()
-    clean = re.sub(r"^(?:NEW|CRITICAL):\s*", "", clean, flags=re.IGNORECASE).strip()
-
-    # Name is everything before the first significant separator keyword
-    match = re.match(
-        r"^(.*?)\s+-\s+(?:#\s*of\s+prospects|Source:|Primary\s+reasons|Data\s+&|Strategic\s+Implication)",
-        clean,
-        re.IGNORECASE,
+def is_section_header(line: str) -> bool:
+    """
+    A competitor section header is a short line that ends with * (Slack bold marker)
+    and isn't a sub-item like '# of prospects' or 'Primary reasons for switching'.
+    """
+    if not line.endswith("*"):
+        return False
+    if line.strip() in ("undefined*", "*"):
+        return False
+    skip_prefixes = (
+        "#", "primary", "nuance", "critical", "new pattern",
+        "this", "these", "the ", "a ", "an ",
+        "booker", "square/", "fresha", "moxie", "boomerang", "helmbot",
     )
-    if match:
-        return match.group(1).strip()
-
-    # Fallback: text before the first ' - '
-    parts = clean.split(" - ", 1)
-    return parts[0].strip()[:120]
+    if any(line.lower().startswith(p) for p in skip_prefixes):
+        return False
+    # Sub-items tend to be long sentences; headers are short names
+    if len(line) > 160:
+        return False
+    return True
 
 
 def parse_sections(brief_text: str) -> list[dict]:
@@ -94,25 +96,30 @@ def parse_sections(brief_text: str) -> list[dict]:
     """
     date_str = extract_date_range(brief_text)
 
-    sections = []
+    sections: list[dict] = []
+    current: dict | None = None
+
     for line in brief_text.split("\n"):
         line = line.strip()
         if not line:
             continue
 
-        # Skip the title line and the opening summary paragraph
+        # Skip title and intro summary lines
         if "leave their current software" in line.lower():
             continue
-        if line.lower().startswith("this consolidated"):
+        if line.lower().startswith(("this compiled", "this consolidated")):
             continue
 
-        name = extract_competitor_name(line)
-        if name:
-            sections.append({
-                "name": name,
-                "content": line,
-                "date_str": date_str,
-            })
+        if is_section_header(line):
+            if current:
+                sections.append(current)
+            name = line.rstrip("*").strip()
+            current = {"name": name, "content": "", "date_str": date_str}
+        elif current:
+            current["content"] += ("" if not current["content"] else "\n") + line
+
+    if current:
+        sections.append(current)
 
     return sections
 
