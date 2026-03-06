@@ -1,14 +1,12 @@
 """
 sync_to_notion.py
 -----------------
-Fetches the latest Marketing Insights brief posted by Momentum to Slack
-and creates a row in the Notion database.
-
-Run manually or schedule weekly with cron:
-    0 9 * * MON python sync_to_notion.py
+Fetches the latest Marketing Insights brief from Slack (posted by Momentum)
+and creates one Notion database row per competitor section.
 """
 
 import os
+import re
 import sys
 from datetime import datetime, timezone, timedelta
 
@@ -19,28 +17,20 @@ from notion_client import Client as NotionClient
 
 load_dotenv()
 
-# ---------------------------------------------------------------------------
-# Credentials (loaded from .env file)
-# ---------------------------------------------------------------------------
-
-SLACK_BOT_TOKEN   = os.environ["SLACK_BOT_TOKEN"]
-SLACK_CHANNEL_ID  = os.environ["SLACK_CHANNEL_ID"]
-NOTION_API_KEY    = os.environ["NOTION_API_KEY"]
+SLACK_BOT_TOKEN    = os.environ["SLACK_BOT_TOKEN"]
+SLACK_CHANNEL_ID   = os.environ["SLACK_CHANNEL_ID"]
+NOTION_API_KEY     = os.environ["NOTION_API_KEY"]
 NOTION_DATABASE_ID = "7c56d30fe9be4803bd00a91cd5c40ca0"
 
-# How far back to look for Momentum briefs (8 days catches any weekly post)
 LOOKBACK_DAYS = 8
 
 
 # ---------------------------------------------------------------------------
-# Step 1 — Pull the brief from Slack
+# Step 1 — Fetch the brief from Slack
 # ---------------------------------------------------------------------------
 
 def fetch_latest_brief(slack: WebClient) -> dict | None:
-    """Return the most recent Momentum brief from the Slack channel."""
-    oldest_ts = (
-        datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)
-    ).timestamp()
+    oldest_ts = (datetime.now(timezone.utc) - timedelta(days=LOOKBACK_DAYS)).timestamp()
 
     try:
         response = slack.conversations_history(
@@ -49,11 +39,10 @@ def fetch_latest_brief(slack: WebClient) -> dict | None:
             limit=50,
         )
     except SlackApiError as e:
-        print(f"[ERROR] Could not read Slack channel: {e.response['error']}")
+        print(f"[ERROR] Slack: {e.response['error']}")
         sys.exit(1)
 
     for msg in response.get("messages", []):
-        # Collect all text from the message, including attachments and blocks
         text = msg.get("text", "")
         for attachment in msg.get("attachments", []):
             text += "\n" + attachment.get("text", "")
@@ -62,7 +51,6 @@ def fetch_latest_brief(slack: WebClient) -> dict | None:
                 text += "\n" + block.get("text", {}).get("text", "")
         text = text.strip()
 
-        # Identify Momentum briefs by their recurring title phrase
         if "leave their current software" in text.lower():
             return {"text": text, "ts": msg["ts"]}
 
@@ -70,78 +58,158 @@ def fetch_latest_brief(slack: WebClient) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# Step 2 — Check for duplicates
+# Step 2 — Parse the brief into one section per competitor
 # ---------------------------------------------------------------------------
 
-def already_synced(notion: NotionClient, slack_ts: str) -> bool:
-    """Return True if this brief was already added to Notion."""
+def extract_date_range(text: str) -> str:
+    """Pull the start date from 'Week of YYYY-MM-DD to ...'"""
+    match = re.search(r"Week of (\d{4}-\d{2}-\d{2})", text, re.IGNORECASE)
+    return match.group(1) if match else datetime.now().strftime("%Y-%m-%d")
+
+
+def extract_competitor_name(line: str) -> str:
+    """Pull the competitor/section name from a brief line."""
+    # Strip leading bullets and label prefixes like NEW:, CRITICAL:, * undefined
+    clean = re.sub(r"^[\*\-\s]*(?:undefined\s+)?", "", line).strip()
+    clean = re.sub(r"^(?:NEW|CRITICAL):\s*", "", clean, flags=re.IGNORECASE).strip()
+
+    # Name is everything before the first significant separator keyword
+    match = re.match(
+        r"^(.*?)\s+-\s+(?:#\s*of\s+prospects|Source:|Primary\s+reasons|Data\s+&|Strategic\s+Implication)",
+        clean,
+        re.IGNORECASE,
+    )
+    if match:
+        return match.group(1).strip()
+
+    # Fallback: text before the first ' - '
+    parts = clean.split(" - ", 1)
+    return parts[0].strip()[:120]
+
+
+def parse_sections(brief_text: str) -> list[dict]:
+    """
+    Split the brief into one dict per competitor.
+    Each dict has: name, content, date_str.
+    """
+    date_str = extract_date_range(brief_text)
+
+    sections = []
+    for line in brief_text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+
+        # Skip the title line and the opening summary paragraph
+        if "leave their current software" in line.lower():
+            continue
+        if line.lower().startswith("this consolidated"):
+            continue
+
+        name = extract_competitor_name(line)
+        if name:
+            sections.append({
+                "name": name,
+                "content": line,
+                "date_str": date_str,
+            })
+
+    return sections
+
+
+# ---------------------------------------------------------------------------
+# Step 3 — Push to Notion (one row per competitor)
+# ---------------------------------------------------------------------------
+
+def get_property_types(notion: NotionClient) -> dict:
+    """Return {property_name: type_string} for every column in the DB."""
+    db = notion.databases.retrieve(database_id=NOTION_DATABASE_ID)
+    return {name: prop["type"] for name, prop in db["properties"].items()}
+
+
+def already_synced(notion: NotionClient, competitor: str, date_str: str) -> bool:
     results = notion.databases.query(
         database_id=NOTION_DATABASE_ID,
         filter={
             "property": "Insight Title",
-            "title": {"contains": slack_ts},
+            "title": {"contains": f"{competitor} \u2014 {date_str}"},
         },
     )
     return len(results["results"]) > 0
 
 
-# ---------------------------------------------------------------------------
-# Step 3 — Push to Notion
-# ---------------------------------------------------------------------------
+def rich_text(value: str) -> list:
+    return [{"type": "text", "text": {"content": value[:1999]}}]
 
-def push_to_notion(notion: NotionClient, brief_text: str, slack_ts: str) -> str:
-    """Create a new page in the Notion database and return its URL."""
-    posted_at = datetime.fromtimestamp(float(slack_ts), tz=timezone.utc)
-    date_str  = posted_at.strftime("%Y-%m-%d")
 
-    # Use the Slack timestamp in the title so we can detect duplicates later
-    title = f"Marketing Insights Brief — {date_str} [{slack_ts}]"
+def build_properties(section: dict, prop_types: dict) -> dict:
+    title = f"{section['name']} \u2014 {section['date_str']}"
 
-    # Break the brief text into paragraph blocks for the page body
-    # (Notion has a 2,000 character limit per block)
-    children = []
-    for line in brief_text.split("\n"):
-        line = line.strip()
-        if not line:
+    props: dict = {
+        "Insight Title": {"title": rich_text(title)},
+    }
+
+    def set_prop(name, value):
+        """Set a property using the correct type for this database."""
+        if name not in prop_types:
+            return
+        t = prop_types[name]
+        if t == "rich_text":
+            props[name] = {"rich_text": rich_text(value)}
+        elif t == "select":
+            props[name] = {"select": {"name": value}}
+        elif t == "multi_select":
+            props[name] = {"multi_select": [{"name": value}]}
+        elif t == "url":
+            props[name] = {"url": value}
+        elif t == "email":
+            pass  # skip
+        elif t == "date":
+            props[name] = {"date": {"start": value}}
+
+    set_prop("Date Collected", section["date_str"])
+    set_prop("Contributor", "Momentum")
+    set_prop("Key Takeaways", section["content"])
+    set_prop("Insight Type", "Competitive Intelligence")
+    set_prop("Source Document", "Slack #marketing-insights")
+
+    return props
+
+
+def sync_sections(notion: NotionClient, sections: list[dict]) -> tuple[int, int]:
+    prop_types = get_property_types(notion)
+
+    created = 0
+    skipped = 0
+
+    for section in sections:
+        if already_synced(notion, section["name"], section["date_str"]):
+            print(f"  Already exists — skipping: {section['name']}")
+            skipped += 1
             continue
-        for chunk in [line[i:i+1999] for i in range(0, len(line), 1999)]:
-            children.append({
+
+        props = build_properties(section, prop_types)
+
+        # Full content also goes in the page body for easy reading
+        children = [
+            {
                 "object": "block",
                 "type": "paragraph",
-                "paragraph": {
-                    "rich_text": [{"type": "text", "text": {"content": chunk}}]
-                },
-            })
+                "paragraph": {"rich_text": rich_text(chunk)},
+            }
+            for chunk in [section["content"][i:i+1999]
+                          for i in range(0, len(section["content"]), 1999)]
+        ]
 
-    page = notion.pages.create(
-        parent={"database_id": NOTION_DATABASE_ID},
-        properties={
-            # Required: the page title
-            "Insight Title": {
-                "title": [{"type": "text", "text": {"content": title}}]
-            },
-            # Date the brief was posted in Slack
-            "Date Collected": {
-                "date": {"start": date_str}
-            },
-            # Who/what sent the insight
-            "Contributor": {
-                "rich_text": [{"type": "text", "text": {"content": "Momentum"}}]
-            },
-            # The full brief text goes into Key Takeaways
-            "Key Takeaways": {
-                "rich_text": [{"type": "text", "text": {"content": brief_text[:1999]}}]
-            },
-            # Source is the Slack channel
-            "Source Document": {
-                "rich_text": [{"type": "text", "text": {"content": "Slack #marketing-insights"}}]
-            },
-        },
-        # Full brief text also appears in the page body for easy reading
-        children=children,
-    )
+        page = notion.pages.create(
+            parent={"database_id": NOTION_DATABASE_ID},
+            properties=props,
+            children=children,
+        )
+        print(f"  Created: {section['name']} → {page.get('url', '')}")
+        created += 1
 
-    return page.get("url", "")
+    return created, skipped
 
 
 # ---------------------------------------------------------------------------
@@ -156,17 +224,20 @@ def main():
     brief = fetch_latest_brief(slack)
 
     if not brief:
-        print("No Momentum brief found in that window. Nothing to sync.")
+        print("No brief found. Nothing to sync.")
         return
 
-    print("Brief found. Checking if it's already in Notion...")
-    if already_synced(notion, brief["ts"]):
-        print("Already synced — skipping.")
+    print("Parsing competitor sections...")
+    sections = parse_sections(brief["text"])
+
+    if not sections:
+        print("No sections found — the brief format may have changed.")
         return
 
+    print(f"Found {len(sections)} section(s): {[s['name'] for s in sections]}\n")
     print("Syncing to Notion...")
-    url = push_to_notion(notion, brief["text"], brief["ts"])
-    print(f"Done! New Notion page: {url}")
+    created, skipped = sync_sections(notion, sections)
+    print(f"\nDone! {created} row(s) created, {skipped} skipped.")
 
 
 if __name__ == "__main__":
