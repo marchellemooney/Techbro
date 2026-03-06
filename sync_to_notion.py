@@ -2,7 +2,8 @@
 sync_to_notion.py
 -----------------
 Fetches the latest Marketing Insights brief from Slack (posted by Momentum)
-and creates one Notion database row per competitor section.
+and upserts one Notion database row per competitor — updating it each week
+rather than adding new rows.
 """
 
 import os
@@ -125,67 +126,81 @@ def parse_sections(brief_text: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Step 3 — Push to Notion (one row per competitor)
+# Step 3 — Upsert to Notion (one persistent row per competitor)
 # ---------------------------------------------------------------------------
-
-def already_synced(notion: NotionClient, competitor: str, date_str: str) -> bool:
-    results = notion.databases.query(
-        database_id=NOTION_DATABASE_ID,
-        filter={
-            "property": "Insight Title",
-            "title": {"contains": f"{competitor} \u2014 {date_str}"},
-        },
-    )
-    return len(results["results"]) > 0
-
 
 def rich_text(value: str) -> list:
     return [{"type": "text", "text": {"content": value[:1999]}}]
 
 
-def build_properties(section: dict) -> dict:
-    title = f"{section['name']} \u2014 {section['date_str']}"
+def find_competitor_page(notion: NotionClient, competitor_name: str) -> str | None:
+    """Return the page_id of an existing row for this competitor, or None."""
+    results = notion.databases.query(
+        database_id=NOTION_DATABASE_ID,
+        filter={
+            "property": "Insight Title",
+            "title": {"equals": competitor_name},
+        },
+    )
+    pages = results.get("results", [])
+    return pages[0]["id"] if pages else None
 
+
+def build_properties(section: dict) -> dict:
     return {
-        "Insight Title":  {"title": rich_text(title)},
+        "Insight Title":  {"title": rich_text(section["name"])},
         "Date Collected": {"date": {"start": section["date_str"]}},
         "Key Takeaways":  {"rich_text": rich_text(section["content"])},
         "Insight Type":   {"select": {"name": "Competitive Intelligence"}},
     }
 
 
-def sync_sections(notion: NotionClient, sections: list[dict]) -> tuple[int, int]:
+def content_blocks(content: str) -> list:
+    return [
+        {
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {"rich_text": rich_text(chunk)},
+        }
+        for chunk in [content[i:i+1999] for i in range(0, len(content), 1999)]
+    ]
+
+
+def replace_page_body(notion: NotionClient, page_id: str, content: str) -> None:
+    """Delete all existing blocks in the page and write fresh content."""
+    existing = notion.blocks.children.list(block_id=page_id)
+    for block in existing.get("results", []):
+        notion.blocks.delete(block_id=block["id"])
+    if content.strip():
+        notion.blocks.children.append(
+            block_id=page_id,
+            children=content_blocks(content),
+        )
+
+
+def upsert_sections(notion: NotionClient, sections: list[dict]) -> tuple[int, int]:
     created = 0
-    skipped = 0
+    updated = 0
 
     for section in sections:
-        if already_synced(notion, section["name"], section["date_str"]):
-            print(f"  Already exists — skipping: {section['name']}")
-            skipped += 1
-            continue
-
         props = build_properties(section)
+        page_id = find_competitor_page(notion, section["name"])
 
-        # Full content also goes in the page body for easy reading
-        children = [
-            {
-                "object": "block",
-                "type": "paragraph",
-                "paragraph": {"rich_text": rich_text(chunk)},
-            }
-            for chunk in [section["content"][i:i+1999]
-                          for i in range(0, len(section["content"]), 1999)]
-        ]
+        if page_id:
+            notion.pages.update(page_id=page_id, properties=props)
+            replace_page_body(notion, page_id, section["content"])
+            print(f"  Updated : {section['name']} ({section['date_str']})")
+            updated += 1
+        else:
+            page = notion.pages.create(
+                parent={"database_id": NOTION_DATABASE_ID},
+                properties=props,
+                children=content_blocks(section["content"]),
+            )
+            print(f"  Created : {section['name']} → {page.get('url', '')}")
+            created += 1
 
-        page = notion.pages.create(
-            parent={"database_id": NOTION_DATABASE_ID},
-            properties=props,
-            children=children,
-        )
-        print(f"  Created: {section['name']} → {page.get('url', '')}")
-        created += 1
-
-    return created, skipped
+    return created, updated
 
 
 # ---------------------------------------------------------------------------
@@ -211,9 +226,9 @@ def main():
         return
 
     print(f"Found {len(sections)} section(s): {[s['name'] for s in sections]}\n")
-    print("Syncing to Notion...")
-    created, skipped = sync_sections(notion, sections)
-    print(f"\nDone! {created} row(s) created, {skipped} skipped.")
+    print("Upserting to Notion...")
+    created, updated = upsert_sections(notion, sections)
+    print(f"\nDone! {created} row(s) created, {updated} updated.")
 
 
 if __name__ == "__main__":
