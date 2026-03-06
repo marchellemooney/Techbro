@@ -205,11 +205,14 @@ def rich_text(value: str) -> list:
 
 def find_competitor_page(notion: NotionClient, competitor_name: str) -> str | None:
     """Return the page_id of an existing row for this competitor, or None."""
-    results = notion.databases.query(
-        database_id=NOTION_DATABASE_ID,
-        filter={
-            "property": "Insight Title",
-            "title": {"equals": competitor_name},
+    results = notion.request(
+        path=f"databases/{NOTION_DATABASE_ID}/query",
+        method="POST",
+        body={
+            "filter": {
+                "property": "Insight Title",
+                "title": {"equals": competitor_name},
+            }
         },
     )
     pages = results.get("results", [])
