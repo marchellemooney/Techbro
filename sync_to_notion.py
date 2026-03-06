@@ -117,7 +117,7 @@ def parse_sections(brief_text: str) -> list[dict]:
         if is_section_header(line):
             if current:
                 sections.append(current)
-            name = line.strip("*").strip()
+            name = line.replace("*", "").lstrip("- ").strip()
             current = {"name": name, "content": "", "date_str": date_str}
         elif current:
             current["content"] += ("" if not current["content"] else "\n") + line
